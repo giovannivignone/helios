@@ -1,54 +1,72 @@
-use std::fmt::Display;
+use alloy::{
+    consensus::TrieAccount,
+    primitives::{Bytes, B256, U256},
+    rpc::types::EIP1186StorageProof,
+    sol_types::decode_revert_reason,
+};
+use eyre::Report;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use tokio::sync::broadcast::Receiver;
 
-use serde::{de::Error, Deserialize};
-use ssz_rs::Vector;
+use crate::network_spec::NetworkSpec;
 
-pub type Bytes32 = Vector<u8, 32>;
-
-#[derive(Debug, Clone, Copy)]
-pub enum BlockTag {
-    Latest,
-    Finalized,
-    Number(u64),
+#[derive(Default, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Account {
+    pub account: TrieAccount,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<Bytes>,
+    pub account_proof: Vec<Bytes>,
+    pub storage_proof: Vec<EIP1186StorageProof>,
 }
 
-impl Display for BlockTag {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let formatted = match self {
-            Self::Latest => "latest".to_string(),
-            Self::Finalized => "finalized".to_string(),
-            Self::Number(num) => num.to_string(),
-        };
-
-        write!(f, "{formatted}")
+impl Account {
+    /// Retrieve the value at the given storage slot.
+    pub fn get_storage_value(&self, slot: B256) -> Option<U256> {
+        self.storage_proof
+            .iter()
+            .find_map(|EIP1186StorageProof { key, value, .. }| {
+                if key.as_b256() == slot {
+                    Some(*value)
+                } else {
+                    None
+                }
+            })
     }
 }
 
-impl<'de> Deserialize<'de> for BlockTag {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let block: String = serde::Deserialize::deserialize(deserializer)?;
-        let parse_error = D::Error::custom("could not parse block tag");
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SubscriptionType {
+    NewHeads,
+    NewPendingTransactions,
+    Logs,
+}
 
-        let block_tag = match block.as_str() {
-            "latest" => BlockTag::Latest,
-            "finalized" => BlockTag::Finalized,
-            _ => match block.strip_prefix("0x") {
-                Some(hex_block) => {
-                    let num = u64::from_str_radix(hex_block, 16).map_err(|_| parse_error)?;
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum SubscriptionEvent<N: NetworkSpec> {
+    NewHeads(N::BlockResponse),
+}
 
-                    BlockTag::Number(num)
-                }
-                None => {
-                    let num = block.parse().map_err(|_| parse_error)?;
+pub type SubEventRx<N> = Receiver<SubscriptionEvent<N>>;
 
-                    BlockTag::Number(num)
-                }
-            },
-        };
+#[derive(Debug, Error)]
+pub enum EvmError {
+    #[error("execution reverted: {}", display_revert(.0))]
+    Revert(Option<Bytes>),
 
-        Ok(block_tag)
+    #[error("evm error: {0:?}")]
+    Generic(String),
+
+    #[error("rpc error: {0:?}")]
+    RpcError(Report),
+}
+
+fn display_revert(output: &Option<Bytes>) -> String {
+    match output {
+        Some(bytes) => decode_revert_reason(bytes.as_ref()).unwrap_or(hex::encode(bytes)),
+        None => "execution halted".to_string(),
     }
 }

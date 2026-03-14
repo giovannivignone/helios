@@ -1,93 +1,72 @@
-#![allow(deprecated)]
+use std::path::PathBuf;
 
-use env_logger::Env;
-use ethers::prelude::*;
-use std::{path::PathBuf, sync::Arc};
+use alloy::eips::BlockNumberOrTag;
+use alloy::primitives::{Address, Bytes};
+use alloy::rpc::types::TransactionRequest;
+use dotenv::dotenv;
+use tracing::info;
+use tracing_subscriber::filter::{EnvFilter, LevelFilter};
+use tracing_subscriber::FmtSubscriber;
 
-use helios::{
-    client::{Client, ClientBuilder, FileDB},
-    config::networks::Network,
-    types::{BlockTag, CallOpts},
-};
-
-// Generate the type-safe contract bindings with an ABI
-abigen!(
-    Renderer,
-    r#"[
-        function renderBroker(uint256) external view returns (string memory)
-        function renderBroker(uint256, uint256) external view returns (string memory)
-    ]"#,
-    event_derives(serde::Deserialize, serde::Serialize)
-);
+use helios::ethereum::{config::networks::Network, EthereumClient, EthereumClientBuilder};
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
-    env_logger::Builder::from_env(Env::default().default_filter_or("debug")).init();
+    let env_filter = EnvFilter::builder()
+        .with_default_directive(LevelFilter::INFO.into())
+        .from_env()
+        .expect("invalid env filter");
+
+    let subscriber = FmtSubscriber::builder()
+        .with_env_filter(env_filter)
+        .finish();
+
+    tracing::subscriber::set_global_default(subscriber).expect("subscriber set failed");
 
     // Load the rpc url using the `MAINNET_EXECUTION_RPC` environment variable
+    dotenv().ok();
     let eth_rpc_url = std::env::var("MAINNET_EXECUTION_RPC")?;
-    let consensus_rpc = "https://www.lightclientdata.org";
-    log::info!("Consensus RPC URL: {}", consensus_rpc);
+    let consensus_rpc = "http://testing.mainnet.beacon-api.nimbus.team";
+    info!("Using consensus RPC URL: {}", consensus_rpc);
 
     // Construct the client
     let data_dir = PathBuf::from("/tmp/helios");
-    let mut client: Client<FileDB> = ClientBuilder::new()
-        .network(Network::MAINNET)
+    let client: EthereumClient = EthereumClientBuilder::new()
+        .network(Network::Mainnet)
         .data_dir(data_dir)
-        .consensus_rpc(consensus_rpc)
-        .execution_rpc(&eth_rpc_url)
+        .consensus_rpc(consensus_rpc)?
+        .execution_rpc(&eth_rpc_url)?
         .load_external_fallback()
+        .with_file_db()
         .build()?;
-    log::info!(
+
+    info!(
         "[\"{}\"] Client built with external checkpoint fallbacks",
-        Network::MAINNET
+        Network::Mainnet
     );
 
-    // Start the client
-    client.start().await?;
-
-    // Call the erroneous account method
-    // The expected asset is: https://0x8bb9a8baeec177ae55ac410c429cbbbbb9198cac.w3eth.io/renderBroker/5
-    // Retrieved by calling `renderBroker(5)` on the contract: https://etherscan.io/address/0x8bb9a8baeec177ae55ac410c429cbbbbb9198cac#code
-    let account = "0x8bb9a8baeec177ae55ac410c429cbbbbb9198cac";
-    let method = "renderBroker(uint256)";
-    let method2 = "renderBroker(uint256, uint256)";
-    let argument = U256::from(5);
-    let address = account.parse::<Address>()?;
-    let block = BlockTag::Latest;
-    let provider = Provider::<Http>::try_from(eth_rpc_url)?;
-    let render = Renderer::new(address, Arc::new(provider.clone()));
-    log::debug!("Context: call @ {account}::{method} <{argument}>");
-
-    // Call using abigen
-    let result = render.render_broker_0(argument).call().await?;
-    log::info!(
-        "[ABIGEN] {account}::{method} -> Response Length: {:?}",
-        result.len()
-    );
-    let render = Renderer::new(address, Arc::new(provider.clone()));
-    let result = render
-        .render_broker_1(argument, U256::from(10))
-        .call()
-        .await?;
-    log::info!(
-        "[ABIGEN] {account}::{method2} -> Response Length: {:?}",
-        result.len()
-    );
+    // Wait for Helios to sync
+    client.wait_synced().await?;
 
     // Call on helios client
-    let encoded_call = render.render_broker_0(argument).calldata().unwrap();
-    let call_opts = CallOpts {
-        from: Some("0xBE0eB53F46cd790Cd13851d5EFf43D12404d33E8".parse::<Address>()?),
-        to: Some(address),
-        gas: Some(U256::from(U64::MAX.as_u64())),
+    let tx = TransactionRequest {
+        from: None,
+        to: Some(
+            "0x6B175474E89094C44Da98b954EedeAC495271d0F"
+                .parse::<Address>()?
+                .into(),
+        ),
+        gas: None,
         gas_price: None,
         value: None,
-        data: Some(encoded_call.to_vec()),
+        input: "0x18160ddd".parse::<Bytes>()?.into(),
+        ..Default::default()
     };
-    log::debug!("Calling helios client on block: {block:?}");
-    let result = client.call(&call_opts, block).await?;
-    log::info!("[HELIOS] {account}::{method}  ->{:?}", result.len());
+
+    let result = client
+        .call(&tx, BlockNumberOrTag::Latest.into(), None)
+        .await?;
+    info!("[HELIOS] DAI total supply: {:?}", result);
 
     Ok(())
 }

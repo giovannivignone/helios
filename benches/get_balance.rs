@@ -1,7 +1,8 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use ethers::prelude::*;
-use helios::types::BlockTag;
 use std::str::FromStr;
+
+use alloy::eips::BlockId;
+use alloy::primitives::Address;
+use criterion::{criterion_group, criterion_main, Criterion};
 
 mod harness;
 
@@ -9,7 +10,7 @@ criterion_main!(get_balance);
 criterion_group! {
     name = get_balance;
     config = Criterion::default().sample_size(10);
-    targets = bench_mainnet_get_balance, bench_goerli_get_balance
+    targets = bench_mainnet_get_balance, bench_sepolia_get_balance
 }
 
 /// Benchmark mainnet get balance.
@@ -27,19 +28,19 @@ pub fn bench_mainnet_get_balance(c: &mut Criterion) {
 
         // Get the beacon chain deposit contract address.
         let addr = Address::from_str("0x00000000219ab540356cbb839cbe05303d7705fa").unwrap();
-        let block = BlockTag::Latest;
+        let block = BlockId::latest();
 
         // Execute the benchmark asynchronously.
         b.to_async(rt).iter(|| async {
             let inner = std::sync::Arc::clone(&client);
-            inner.get_balance(&addr, block).await.unwrap()
+            inner.get_balance(addr, block).await.unwrap()
         })
     });
 }
 
-/// Benchmark goerli get balance.
-/// Address: 0xB4FBF271143F4FBf7B91A5ded31805e42b2208d6 (goerli weth)
-pub fn bench_goerli_get_balance(c: &mut Criterion) {
+/// Benchmark sepolia get balance.
+/// Address: 0x7b79995e5f793a07bc00c21412e50ecae098e7f9 (sepolia weth)
+pub fn bench_sepolia_get_balance(c: &mut Criterion) {
     c.bench_function("get_balance", |b| {
         // Create a new multi-threaded tokio runtime.
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -47,24 +48,24 @@ pub fn bench_goerli_get_balance(c: &mut Criterion) {
             .build()
             .unwrap();
 
-        // Construct a goerli client using our harness and tokio runtime.
-        let gc = match harness::construct_goerli_client(&rt) {
-            Ok(gc) => gc,
+        // Construct a sepolia client using our harness and tokio runtime.
+        let sc = match harness::construct_sepolia_client(&rt) {
+            Ok(sc) => sc,
             Err(e) => {
-                println!("failed to construct goerli client: {}", e);
+                println!("failed to construct sepolia client: {}", e);
                 std::process::exit(1);
             }
         };
-        let client = std::sync::Arc::new(gc);
+        let client = std::sync::Arc::new(sc);
 
         // Get the beacon chain deposit contract address.
-        let addr = Address::from_str("0xB4FBF271143F4FBf7B91A5ded31805e42b2208d6").unwrap();
-        let block = BlockTag::Latest;
+        let addr = Address::from_str("0x7b79995e5f793a07bc00c21412e50ecae098e7f9").unwrap();
+        let block = BlockId::latest();
 
         // Execute the benchmark asynchronously.
         b.to_async(rt).iter(|| async {
             let inner = std::sync::Arc::clone(&client);
-            inner.get_balance(&addr, block).await.unwrap()
+            inner.get_balance(addr, block).await.unwrap()
         })
     });
 }
